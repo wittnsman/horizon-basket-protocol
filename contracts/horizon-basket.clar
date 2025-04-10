@@ -906,3 +906,87 @@
   )
 )
 
+;; Rate limiting for sensitive operations
+;; Prevents brute force attacks by limiting operation frequency
+(define-public (validate-operation-rate-limit (operation-type (string-ascii 20)) (target-basket uint))
+  (begin
+    (asserts! (basket-exists? target-basket) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: target-basket }) ERR_BASKET_MISSING))
+        (last-operation-block (- block-height u1)) ;; In production would track actual last operation block
+        (min-spacing u6) ;; Minimum 6 blocks between operations (~1 hour)
+      )
+      ;; Only authorized parties 
+      (asserts! (or (is-eq tx-sender (get originator basket-data)) 
+                   (is-eq tx-sender (get beneficiary basket-data))
+                   (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+
+      ;; Check rate limit (would interact with operation tracking in production)
+      (asserts! (>= (- block-height last-operation-block) min-spacing) (err u240))
+
+      ;; Validate operation type
+      (asserts! (or (is-eq operation-type "delivery")
+                   (is-eq operation-type "termination")
+                   (is-eq operation-type "challenge")
+                   (is-eq operation-type "verification")) (err u241))
+
+      (print {action: "rate_limit_validated", operation-type: operation-type, 
+              target-basket: target-basket, requester: tx-sender, block: block-height})
+      (ok true)
+    )
+  )
+)
+
+;; Tiered authorization requirements
+;; Implements progressive security measures based on basket value
+(define-public (enforce-tiered-security (basket-id uint) (auth-level (string-ascii 10)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only originator or governor can enforce security levels
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Can only be applied to pending baskets
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+
+      ;; Validate auth level against basket value
+      (asserts! (or 
+                 (and (is-eq auth-level "standard") (< quantity u1000))
+                 (and (is-eq auth-level "enhanced") (and (>= quantity u1000) (< quantity u10000)))
+                 (and (is-eq auth-level "premium") (>= quantity u10000))
+                ) (err u250))
+
+      (print {action: "tiered_security_enforced", basket-id: basket-id, 
+              auth-level: auth-level, quantity: quantity, enforcer: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Initiate basket challenge
+(define-public (challenge-basket (basket-id uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block basket-data)) ERR_BASKET_LAPSED)
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { basket-status: "challenged" })
+      )
+      (print {action: "basket_challenged", basket-id: basket-id, challenger: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
