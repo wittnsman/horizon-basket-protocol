@@ -377,3 +377,111 @@
     )
   )
 )
+
+;; Prolong basket duration
+(define-public (prolong-basket-duration (basket-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> additional-blocks u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) ERR_INVALID_QUANTITY) ;; Maximum ~10 days extension
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data)) 
+        (beneficiary (get beneficiary basket-data))
+        (current-termination (get termination-block basket-data))
+        (updated-termination (+ current-termination additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { termination-block: updated-termination })
+      )
+      (print {action: "basket_prolonged", basket-id: basket-id, requester: tx-sender, new-termination-block: updated-termination})
+      (ok true)
+    )
+  )
+)
+
+;; Recover lapsed basket resources
+(define-public (recover-lapsed-basket (basket-id uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+        (termination (get termination-block basket-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      (asserts! (> block-height termination) (err u108)) ;; Must be lapsed
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set BasketRegistry
+              { basket-id: basket-id }
+              (merge basket-data { basket-status: "lapsed" })
+            )
+            (print {action: "lapsed_basket_recovered", basket-id: basket-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Securely transition basket between defined states
+;; Ensures state transitions follow allowed paths and records history
+(define-public (secure-basket-transition (basket-id uint) (target-state (string-ascii 10)) (transition-reason (string-ascii 50)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (current-state (get basket-status basket-data))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+      )
+      ;; Verify authorization based on transition type
+      (asserts! (or (is-eq tx-sender PROTOCOL_GOVERNOR) 
+                  (is-eq tx-sender originator)
+                  (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+
+      ;; Validate transition is allowed based on current state
+      (asserts! (or 
+                 ;; From pending
+                 (and (is-eq current-state "pending") 
+                      (or (is-eq target-state "confirmed") 
+                          (is-eq target-state "challenged")
+                          (is-eq target-state "suspended")))
+                 ;; From confirmed
+                 (and (is-eq current-state "confirmed") 
+                      (or (is-eq target-state "delivered")
+                          (is-eq target-state "challenged")))
+                 ;; From challenged
+                 (and (is-eq current-state "challenged") 
+                      (or (is-eq target-state "pending")
+                          (is-eq target-state "adjudicated")))
+                 ;; From suspended
+                 (and (is-eq current-state "suspended") 
+                      (or (is-eq target-state "pending")
+                          (is-eq target-state "terminated")))
+                ) (err u270))
+
+      ;; Update basket to new state
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { basket-status: target-state })
+      )
+
+      (print {action: "basket_transitioned", basket-id: basket-id, 
+              from-state: current-state, to-state: target-state, 
+              transition-reason: transition-reason, transitioner: tx-sender})
+      (ok true)
+    )
+  )
+)
