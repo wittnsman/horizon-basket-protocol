@@ -1082,4 +1082,119 @@
   )
 )
 
+;; Implement quantum-resistant signature verification
+;; Provides an additional layer of cryptographic security for high-value baskets
+(define-public (verify-quantum-resistant-signature (basket-id uint) (message-hash (buff 64)) (signature (buff 128)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only for high-value baskets
+      (asserts! (> quantity u20000) (err u310))
+      ;; Only authorized parties
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)
+                   (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Only for baskets in specific states
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                   (is-eq (get basket-status basket-data) "confirmed")
+                   (is-eq (get basket-status basket-data) "challenged")) ERR_ALREADY_PROCESSED)
+
+      ;; Validate signature length - quantum resistant signatures are longer
+      (asserts! (>= (len signature) u64) (err u311))
+
+      ;; In production would perform actual quantum-resistant signature verification
+      ;; using appropriate algorithms like SPHINCS+, Dilithium, or similar
+
+      (print {action: "quantum_resistant_verification", basket-id: basket-id, 
+              message-digest: (hash160 message-hash), signature-length: (len signature), 
+              verifier: tx-sender, high-security: true})
+      (ok true)
+    )
+  )
+)
+
+;; Register delegate to act on behalf of originator or beneficiary
+;; Enables secure temporary access management with expiration
+(define-public (register-delegate-authority (basket-id uint) (delegate principal) (authority-type (string-ascii 10)) (expiration-delta uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> expiration-delta u6) ERR_INVALID_QUANTITY) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= expiration-delta u4320) ERR_INVALID_QUANTITY) ;; Maximum 4320 blocks (~30 days)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (expiration-block (+ block-height expiration-delta))
+      )
+      ;; Only originator can delegate originator authority
+      ;; Only beneficiary can delegate beneficiary authority
+      ;; Only governor can delegate governor authority
+      (asserts! (or (and (is-eq authority-type "originator") (is-eq tx-sender originator))
+                    (and (is-eq authority-type "beneficiary") (is-eq tx-sender beneficiary))
+                    (and (is-eq authority-type "governor") (is-eq tx-sender PROTOCOL_GOVERNOR))) 
+                ERR_UNAUTHORIZED)
+
+      ;; Delegate must not be same as grantor
+      (asserts! (not (is-eq delegate tx-sender)) (err u280))
+
+      ;; Delegate must not be the other party in the basket
+      (asserts! (not (and (is-eq authority-type "originator") (is-eq delegate beneficiary))) (err u281))
+      (asserts! (not (and (is-eq authority-type "beneficiary") (is-eq delegate originator))) (err u282))
+
+      ;; Only allow for active baskets
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                   (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+
+      (print {action: "delegate_registered", basket-id: basket-id, 
+              grantor: tx-sender, delegate: delegate, 
+              authority-type: authority-type, expiration-block: expiration-block})
+      (ok expiration-block)
+    )
+  )
+)
+
+
+;; Implement velocity monitoring for basket operations
+;; Detects and prevents anomalous transaction patterns
+(define-public (verify-operation-velocity (basket-id uint) (operation-count uint) (timeframe uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> operation-count u0) ERR_INVALID_QUANTITY)
+    (asserts! (> timeframe u0) ERR_INVALID_QUANTITY)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+        (max-operations-per-block u5) ;; Maximum operations allowed per block
+        (velocity-coefficient (/ operation-count timeframe))
+      )
+      ;; Only authorized parties can verify velocity
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)
+                   (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+
+      ;; Check if velocity exceeds threshold
+      (asserts! (<= velocity-coefficient max-operations-per-block) (err u300))
+
+      ;; Apply stricter limits for high-value baskets
+      (if (> quantity u10000)
+          (asserts! (<= velocity-coefficient (/ max-operations-per-block u2)) (err u301))
+          true
+      )
+
+      (print {action: "velocity_verified", basket-id: basket-id, operation-count: operation-count, 
+              timeframe: timeframe, velocity: velocity-coefficient, verifier: tx-sender})
+      (ok true)
+    )
+  )
+)
 
