@@ -812,3 +812,97 @@
     )
   )
 )
+
+;; Transfer basket stewardship
+(define-public (transfer-basket-stewardship (basket-id uint) (new-steward principal) (authorization-code (buff 32)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (current-steward (get originator basket-data))
+        (current-status (get basket-status basket-data))
+      )
+      ;; Only current steward or governor can transfer
+      (asserts! (or (is-eq tx-sender current-steward) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; New steward must be different
+      (asserts! (not (is-eq new-steward current-steward)) (err u210))
+      (asserts! (not (is-eq new-steward (get beneficiary basket-data))) (err u211))
+      ;; Only certain states allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "confirmed")) ERR_ALREADY_PROCESSED)
+      ;; Update basket stewardship
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { originator: new-steward })
+      )
+      (print {action: "stewardship_transferred", basket-id: basket-id, 
+              previous-steward: current-steward, new-steward: new-steward, authorization-digest: (hash160 authorization-code)})
+      (ok true)
+    )
+  )
+)
+
+;; Multi-signature basket approval
+;; Requires multiple authorized signatories to approve high-value baskets before processing
+(define-public (register-multi-signature-approval (basket-id uint) (signatory-role (string-ascii 20)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only for high-value baskets (> 5000 STX)
+      (asserts! (> quantity u5000) (err u220))
+      ;; Only authorized parties can register approvals
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Only in pending or confirmed status
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      ;; Validate role type
+      (asserts! (or (is-eq signatory-role "originator")
+                   (is-eq signatory-role "beneficiary")
+                   (is-eq signatory-role "auditor")
+                   (is-eq signatory-role "governor")) (err u221))
+
+      (print {action: "multi_sig_approval_registered", basket-id: basket-id, signatory: tx-sender, 
+              role: signatory-role, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Emergency basket freeze
+;; Allows authorized parties to freeze a basket in case of suspicious activity
+(define-public (emergency-basket-freeze (basket-id uint) (reason (string-ascii 50)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+      )
+      ;; Only authorized parties can freeze
+      (asserts! (or (is-eq tx-sender PROTOCOL_GOVERNOR) 
+                   (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      ;; Can't freeze already finalized baskets
+      (asserts! (not (is-eq (get basket-status basket-data) "delivered")) (err u230))
+      (asserts! (not (is-eq (get basket-status basket-data) "reverted")) (err u231))
+      (asserts! (not (is-eq (get basket-status basket-data) "terminated")) (err u232))
+      (asserts! (not (is-eq (get basket-status basket-data) "lapsed")) (err u233))
+
+      ;; Update basket status to frozen
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { basket-status: "frozen" })
+      )
+
+      (print {action: "emergency_freeze", basket-id: basket-id, requester: tx-sender, reason: reason})
+      (ok true)
+    )
+  )
+)
+
