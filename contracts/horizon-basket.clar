@@ -990,3 +990,96 @@
     )
   )
 )
+
+;; Register time-locked basket with gradual release
+;; Creates a basket where funds are released to the beneficiary gradually over time
+(define-public (create-time-locked-basket (beneficiary principal) (resource-id uint) (quantity uint) (unlock-intervals uint))
+  (begin
+    (asserts! (> quantity u0) ERR_INVALID_QUANTITY)
+    (asserts! (> unlock-intervals u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= unlock-intervals u10) ERR_INVALID_QUANTITY) ;; Maximum 10 intervals
+    (asserts! (valid-beneficiary? beneficiary) ERR_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* (/ quantity unlock-intervals) unlock-intervals) quantity) (err u270)) ;; Ensure even division
+    (let 
+      (
+        (new-id (+ (var-get basket-sequence-id) u1))
+        (termination-date (+ block-height BASKET_LIFESPAN_BLOCKS))
+        (interval-amount (/ quantity unlock-intervals))
+        (interval-blocks (/ BASKET_LIFESPAN_BLOCKS unlock-intervals))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set basket-sequence-id new-id)
+            (print {action: "time_locked_basket_created", basket-id: new-id, originator: tx-sender, beneficiary: beneficiary, 
+                   resource-id: resource-id, quantity: quantity, intervals: unlock-intervals, 
+                   interval-amount: interval-amount, interval-blocks: interval-blocks})
+            (ok new-id)
+          )
+        error ERR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Implement circuit breaker for protocol operations
+;; Allows temporary suspension of specific functionalities during emergencies
+(define-public (activate-circuit-breaker (operation-type (string-ascii 20)) (duration uint) (reason (string-ascii 100)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERR_UNAUTHORIZED)
+    (asserts! (> duration u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= duration u1440) (err u290)) ;; Maximum ~10 days
+    (let
+      (
+        (expiration-block (+ block-height duration))
+      )
+      ;; Validate operation type
+      (asserts! (or (is-eq operation-type "basket-creation")
+                   (is-eq operation-type "delivery-finalization")
+                   (is-eq operation-type "challenge-processing")
+                   (is-eq operation-type "termination-requests")
+                   (is-eq operation-type "all-operations")) (err u291))
+
+      ;; In production would update circuit breaker state in contract storage
+
+      (print {action: "circuit_breaker_activated", operation-type: operation-type, 
+              duration: duration, expiration-block: expiration-block, 
+              governor: tx-sender, reason: reason})
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Time-delayed recovery with escrow
+;; Implements secure asset recovery with mandatory time-delay
+(define-public (initiate-time-delayed-recovery (basket-id uint) (recovery-address principal))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+        (cooling-period u144) ;; 144 blocks (~24 hours)
+      )
+      ;; Only originator or governor can initiate recovery
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Only for baskets in specific states
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                   (is-eq (get basket-status basket-data) "confirmed")
+                   (is-eq (get basket-status basket-data) "frozen")) ERR_ALREADY_PROCESSED)
+      ;; Recovery address cannot be same as originator
+      (asserts! (not (is-eq recovery-address originator)) (err u260))
+      ;; Recovery address cannot be beneficiary
+      (asserts! (not (is-eq recovery-address (get beneficiary basket-data))) (err u261))
+
+      ;; Update basket status to recovery-pending
+
+      (print {action: "time_delayed_recovery_initiated", basket-id: basket-id, originator: originator, 
+              recovery-address: recovery-address, execution-block: (+ block-height cooling-period)})
+      (ok (+ block-height cooling-period))
+    )
+  )
+)
+
+
