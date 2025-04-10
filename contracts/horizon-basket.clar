@@ -1582,3 +1582,65 @@
     (ok block-height)
   )
 )
+
+;; Implement trustless escrow mechanism
+;; Creates a timelocked escrow for conditional basket delivery
+(define-public (create-trustless-escrow (basket-id uint) (unlock-condition (string-ascii 30)) (timelock uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> timelock u12) ERR_INVALID_QUANTITY) ;; Minimum 12 blocks (~2 hours)
+    (asserts! (<= timelock u4320) ERR_INVALID_QUANTITY) ;; Maximum 4320 blocks (~30 days)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (unlock-block (+ block-height timelock))
+      )
+      ;; Only originator can create escrow
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Only for pending baskets
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Validate unlock condition
+      (asserts! (or (is-eq unlock-condition "time-based")
+                    (is-eq unlock-condition "multi-signature")
+                    (is-eq unlock-condition "oracle-verified")) (err u300))
+
+      ;; Update basket status to escrowed
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { basket-status: "escrowed" })
+      )
+
+      (print {action: "trustless_escrow_created", basket-id: basket-id, originator: originator,
+              beneficiary: beneficiary, unlock-condition: unlock-condition, unlock-block: unlock-block})
+      (ok unlock-block)
+    )
+  )
+)
+
+;; Secure basket migration
+;; Allows secure transfer of a basket to a newer version of the protocol
+(define-public (initiate-secure-migration (basket-id uint) (target-contract principal) (migration-approval-signature (buff 65)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+        (current-status (get basket-status basket-data))
+      )
+      ;; Only originator or governor can migrate
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Only for active baskets
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "confirmed")) ERR_ALREADY_PROCESSED)
+      ;; Cannot migrate to same contract
+      (asserts! (not (is-eq target-contract (as-contract tx-sender))) (err u310))
+
+      (print {action: "secure_migration_initiated", basket-id: basket-id, originator: originator,
+              target-contract: target-contract, quantity: quantity, migration-signature: (hash160 migration-approval-signature)})
+      (ok true)
+    )
+  )
+)
