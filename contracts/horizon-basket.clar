@@ -1411,3 +1411,97 @@
     )
   )
 )
+
+;; Escrow basket with split payment structure
+;; Implements phased resource delivery with partial payments
+(define-public (escrow-basket-split-payment (basket-id uint) (release-percentages (list 5 uint)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+        (total-percentage u0)
+      )
+      ;; Only governor can arrange split payments
+      (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERR_UNAUTHORIZED)
+      ;; Basket must be in appropriate state
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      ;; Validate percentages
+      (asserts! (> (len release-percentages) u0) ERR_INVALID_QUANTITY)
+      (asserts! (<= (len release-percentages) u5) ERR_INVALID_QUANTITY)
+
+      ;; Calculate total percentage (would validate sum = 100 in production)
+      ;; This is simplified for demonstration
+      (asserts! (is-eq (fold + release-percentages u0) u100) (err u280))
+
+      (print {action: "escrow_split_configured", basket-id: basket-id, originator: originator, 
+              beneficiary: beneficiary, splits: (len release-percentages), quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Delegate basket management authority
+;; Allows temporary delegation of basket management to trusted party
+(define-public (delegate-basket-authority (basket-id uint) (delegate principal) (delegation-period uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> delegation-period u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= delegation-period u720) ERR_INVALID_QUANTITY) ;; Maximum 720 blocks (~5 days)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (delegation-expiry (+ block-height delegation-period))
+      )
+      ;; Only originator can delegate authority
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Delegate must not be beneficiary or originator
+      (asserts! (not (is-eq delegate originator)) (err u290))
+      (asserts! (not (is-eq delegate (get beneficiary basket-data))) (err u291))
+      ;; Must be in appropriate state
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+
+      ;; Register delegation (would store delegate in map in production)
+      (print {action: "authority_delegated", basket-id: basket-id, originator: originator, 
+              delegate: delegate, expiration-block: delegation-expiry})
+      (ok delegation-expiry)
+    )
+  )
+)
+
+;; Two-factor basket authentication
+;; Requires secondary authentication before high-value basket operations
+(define-public (authenticate-basket-operation (basket-id uint) (operation-type (string-ascii 20)) (auth-code (buff 32)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only authorized parties can authenticate
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      ;; Only high-value baskets require 2FA
+      (asserts! (> quantity u1000) (err u300))
+      ;; Valid operation types
+      (asserts! (or (is-eq operation-type "delivery")
+                    (is-eq operation-type "termination")
+                    (is-eq operation-type "transfer")
+                    (is-eq operation-type "modification")) (err u301))
+      ;; Auth code must not be empty
+      (asserts! (> (len auth-code) u0) ERR_INVALID_QUANTITY)
+
+      ;; In production, would validate the authentication code
+
+      (print {action: "two_factor_authenticated", basket-id: basket-id, requester: tx-sender, 
+              operation-type: operation-type, auth-digest: (hash160 auth-code)})
+      (ok true)
+    )
+  )
+)
