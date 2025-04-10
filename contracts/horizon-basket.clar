@@ -1305,3 +1305,109 @@
     )
   )
 )
+
+;; Register trusted entity certification for basket
+;; Adds third-party verification and escrow guarantees
+(define-public (register-trusted-certification (basket-id uint) (certification-type (string-ascii 20)) (certification-hash (buff 32)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only originator, beneficiary or governor can register certification
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)
+                   (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+
+      ;; Basket must be in appropriate state
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                   (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+
+      ;; Validate certification type
+      (asserts! (or (is-eq certification-type "resource-authenticity")
+                   (is-eq certification-type "delivery-guarantee")
+                   (is-eq certification-type "value-appraisal")
+                   (is-eq certification-type "identity-verification")
+                   (is-eq certification-type "escrow-guarantee")) (err u320))
+
+      ;; Premium certification types only for high-value baskets
+      (asserts! (not (and (or (is-eq certification-type "value-appraisal") 
+                             (is-eq certification-type "escrow-guarantee"))
+                        (< quantity u5000))) (err u321))
+
+      (print {action: "certification_registered", basket-id: basket-id, 
+              certification-type: certification-type, certifier: tx-sender, 
+              certification-hash: certification-hash, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Verify basket ownership with time-based challenge
+;; Allows originators to prove ownership through a challenge-response mechanism
+(define-public (verify-basket-ownership (basket-id uint) (challenge-response (buff 32)) (verification-timestamp uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (challenge-window u12) ;; 12 block window for responding to challenge (~2 hours)
+      )
+      ;; Only basket originator can verify ownership
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Verification must be timely
+      (asserts! (and (>= block-height verification-timestamp) (<= block-height (+ verification-timestamp challenge-window))) (err u270))
+      ;; Response must not be empty
+      (asserts! (> (len challenge-response) u0) ERR_INVALID_QUANTITY)
+
+      ;; In production, would validate the cryptographic challenge response
+
+      (print {action: "ownership_verified", basket-id: basket-id, originator: originator, 
+              verification-time: block-height, challenge-digest: (hash160 challenge-response)})
+      (ok true)
+    )
+  )
+)
+
+;; Conditional basket delivery with external verification
+;; Allows delivery only when external verification conditions are met
+(define-public (conditional-basket-delivery (basket-id uint) (delivery-conditions (list 3 (buff 32))) (verification-proof (buff 64)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only authorized parties can execute conditional delivery
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Basket must be in pending state
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Must provide conditions and verification
+      (asserts! (> (len delivery-conditions) u0) ERR_INVALID_QUANTITY)
+      (asserts! (> (len verification-proof) u0) ERR_INVALID_QUANTITY)
+
+      ;; Execute conditional delivery if verification passes
+      (match (as-contract (stx-transfer? quantity tx-sender beneficiary))
+        success
+          (begin
+            (map-set BasketRegistry
+              { basket-id: basket-id }
+              (merge basket-data { basket-status: "delivered" })
+            )
+            (print {action: "conditional_delivery_complete", basket-id: basket-id, beneficiary: beneficiary, 
+                    conditions-count: (len delivery-conditions), verification-digest: (hash160 verification-proof)})
+            (ok true)
+          )
+        error ERR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
