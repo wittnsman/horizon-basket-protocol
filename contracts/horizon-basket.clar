@@ -485,3 +485,90 @@
     )
   )
 )
+
+;; Adjudicate challenge with decision
+(define-public (adjudicate-challenge (basket-id uint) (originator-share uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERR_UNAUTHORIZED)
+    (asserts! (<= originator-share u100) ERR_INVALID_QUANTITY) ;; Share must be 0-100
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+        (originator-amount (/ (* quantity originator-share) u100))
+        (beneficiary-amount (- quantity originator-amount))
+      )
+      (asserts! (is-eq (get basket-status basket-data) "challenged") (err u112)) ;; Must be challenged
+      (asserts! (<= block-height (get termination-block basket-data)) ERR_BASKET_LAPSED)
+
+      ;; Distribute originator's share
+      (unwrap! (as-contract (stx-transfer? originator-amount tx-sender originator)) ERR_MOVEMENT_FAILED)
+
+      ;; Distribute beneficiary's share
+      (unwrap! (as-contract (stx-transfer? beneficiary-amount tx-sender beneficiary)) ERR_MOVEMENT_FAILED)
+
+      (print {action: "challenge_adjudicated", basket-id: basket-id, originator: originator, beneficiary: beneficiary, 
+              originator-share: originator-amount, beneficiary-share: beneficiary-amount, originator-percentage: originator-share})
+      (ok true)
+    )
+  )
+)
+
+;; Register additional supervisor for premium baskets
+(define-public (register-additional-supervisor (basket-id uint) (supervisor principal))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only for premium baskets (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "supervisor_registered", basket-id: basket-id, supervisor: supervisor, requester: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Register authenticity confirmation
+(define-public (register-authenticity-proof (basket-id uint) (confirmation-code (buff 65)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      (print {action: "authenticity_confirmed", basket-id: basket-id, confirmer: tx-sender, confirmation-code: confirmation-code})
+      (ok true)
+    )
+  )
+)
+
+;; Register contingency contact
+(define-public (register-contingency-contact (basket-id uint) (contingency-contact principal))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq contingency-contact tx-sender)) (err u111)) ;; Contingency contact must be different
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "contingency_registered", basket-id: basket-id, originator: originator, contingency: contingency-contact})
+      (ok true)
+    )
+  )
+)
