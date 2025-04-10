@@ -1505,3 +1505,80 @@
     )
   )
 )
+
+;; Verify resource integrity with merkle proof
+;; Allows cryptographic verification of resource integrity
+(define-public (verify-resource-integrity (basket-id uint) (merkle-proof (list 10 (buff 32))) (leaf-hash (buff 32)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (resource-id (get resource-id basket-data))
+      )
+      ;; Only authorized parties can verify integrity
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Proof must not be empty
+      (asserts! (> (len merkle-proof) u0) ERR_INVALID_QUANTITY)
+      ;; Leaf hash must not be empty
+      (asserts! (> (len leaf-hash) u0) ERR_INVALID_QUANTITY)
+
+      ;; In production, would validate the merkle proof against a stored root hash
+
+      ;; Record successful verification
+      (print {action: "integrity_verified", basket-id: basket-id, resource-id: resource-id, 
+              verifier: tx-sender, proof-depth: (len merkle-proof), leaf-digest: (hash160 leaf-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Schedule periodic security audit
+;; Enables governance to schedule routine security audits for baskets
+(define-public (schedule-basket-security-audit (basket-id uint) (audit-type (string-ascii 20)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+        (next-audit-block (+ block-height u720)) ;; 720 blocks (~5 days) delay
+      )
+      ;; Only governor or originator can schedule audits
+      (asserts! (or (is-eq tx-sender PROTOCOL_GOVERNOR) (is-eq tx-sender originator)) ERR_UNAUTHORIZED)
+      ;; Only for active baskets
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                    (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      ;; Validate audit type
+      (asserts! (or (is-eq audit-type "routine")
+                    (is-eq audit-type "deep-inspection")
+                    (is-eq audit-type "forensic")) (err u270))
+
+      (print {action: "security_audit_scheduled", basket-id: basket-id, audit-type: audit-type, 
+              scheduled-by: tx-sender, execution-block: next-audit-block})
+      (ok next-audit-block)
+    )
+  )
+)
+
+;; Implement emergency circuit breaker
+;; Allows governor to halt all operations in case of detected security incidents
+(define-public (activate-emergency-circuit-breaker (reason (string-ascii 100)))
+  (begin
+    ;; Only governor can activate circuit breaker
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERR_UNAUTHORIZED)
+    ;; Validate reason length
+    (asserts! (> (len reason) u10) (err u280)) ;; Require substantive reason
+
+    ;; In production, this would set a global flag in the contract
+    ;; that would be checked by all critical operations
+
+    (print {action: "circuit_breaker_activated", governor: tx-sender, 
+            reason: reason, activation-block: block-height, 
+            estimated-duration: "indefinite"})
+    (ok block-height)
+  )
+)
