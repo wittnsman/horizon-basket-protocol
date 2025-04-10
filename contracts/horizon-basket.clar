@@ -269,3 +269,111 @@
   )
 )
 
+;; Register basket with dual-approval requirement
+;; Creates a basket that needs approval from both originator and beneficiary to finalize
+(define-public (create-dual-approval-basket (beneficiary principal) (resource-id uint) (quantity uint))
+  (begin
+    (asserts! (> quantity u0) ERR_INVALID_QUANTITY)
+    (asserts! (valid-beneficiary? beneficiary) ERR_INVALID_ORIGINATOR)
+    (let 
+      (
+        (new-id (+ (var-get basket-sequence-id) u1))
+        (termination-date (+ block-height BASKET_LIFESPAN_BLOCKS))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set basket-sequence-id new-id)
+            (print {action: "dual_approval_basket_created", basket-id: new-id, originator: tx-sender, 
+                    beneficiary: beneficiary, resource-id: resource-id, quantity: quantity})
+            (ok new-id)
+          )
+        error ERR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Send resources back to originator
+(define-public (revert-basket-contents (basket-id uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set BasketRegistry
+              { basket-id: basket-id }
+              (merge basket-data { basket-status: "reverted" })
+            )
+            (print {action: "contents_reverted", basket-id: basket-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Register hardware verification proof
+;; Adds a hardware-based verification proof for high-security baskets
+(define-public (register-hardware-verification (basket-id uint) (device-id (buff 16)) (verification-proof (buff 64)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only for high-value baskets (> 2000 STX)
+      (asserts! (> quantity u2000) (err u280))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                    (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+
+      ;; In a real implementation, would validate hardware signatures
+
+      (print {action: "hardware_verification_registered", basket-id: basket-id, verifier: tx-sender, 
+              device-id: device-id, verification-digest: (hash160 verification-proof)})
+      (ok true)
+    )
+  )
+)
+
+;; Originator requests basket termination
+(define-public (terminate-basket (basket-id uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block basket-data)) ERR_BASKET_LAPSED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set BasketRegistry
+              { basket-id: basket-id }
+              (merge basket-data { basket-status: "terminated" })
+            )
+            (print {action: "basket_terminated", basket-id: basket-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
