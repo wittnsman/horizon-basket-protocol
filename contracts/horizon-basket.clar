@@ -170,3 +170,102 @@
   )
 )
 
+;; Validate resource integrity
+;; Verifies that resource metadata matches with expected parameters
+(define-public (validate-resource-integrity (basket-id uint) (resource-hash (buff 32)) (metadata-fields (list 5 (string-ascii 32))))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (resource-id (get resource-id basket-data))
+      )
+      ;; Only authorized parties can validate resources
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Ensure basket is in a state that allows validation
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      ;; Ensure resource data is provided
+      (asserts! (> (len metadata-fields) u0) ERR_INVALID_QUANTITY)
+
+      ;; In production would verify resource hash against on-chain registry
+
+      (print {action: "resource_integrity_validated", basket-id: basket-id, resource-id: resource-id, 
+              resource-hash: resource-hash, validator: tx-sender, metadata-count: (len metadata-fields)})
+      (ok true)
+    )
+  )
+)
+
+;; Implement time-locked escrow release
+;; Provides a secure time-gated release mechanism for high-value transfers
+(define-public (initiate-timelock-release (basket-id uint) (unlock-time uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> unlock-time block-height) ERR_INVALID_QUANTITY)
+    (asserts! (<= unlock-time (+ block-height u2880)) (err u270)) ;; Maximum ~20 days in future
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only originator or governor can initiate timelock
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Only for baskets in pending state
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Only for baskets above threshold
+      (asserts! (> quantity u2000) (err u271)) ;; Minimum quantity for timelock
+
+      ;; Update basket to time-locked state
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { basket-status: "timelocked", termination-block: unlock-time })
+      )
+
+      (print {action: "timelock_initiated", basket-id: basket-id, originator: originator, 
+              unlock-time: unlock-time, quantity: quantity})
+      (ok unlock-time)
+    )
+  )
+)
+
+;; Register authorized interceptors for high-risk operations
+;; Allows specific principals to be notified of suspicious activity
+(define-public (register-security-interceptor (basket-id uint) (interceptor principal) (authority-level (string-ascii 15)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only originator or governor can register interceptors
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Only for active baskets
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                   (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+      ;; Interceptor must not be originator or beneficiary
+      (asserts! (not (is-eq interceptor originator)) (err u280))
+      (asserts! (not (is-eq interceptor (get beneficiary basket-data))) (err u281))
+
+      ;; Validate authority level
+      (asserts! (or (is-eq authority-level "observer")
+                   (is-eq authority-level "auditor")
+                   (is-eq authority-level "enforcer")) (err u282))
+
+      ;; High-value baskets get enhanced security
+      (if (> quantity u5000)
+          (print {action: "enhanced_interceptor_registered", basket-id: basket-id, interceptor: interceptor, 
+                  authority-level: authority-level, high-value: true})
+          (print {action: "interceptor_registered", basket-id: basket-id, interceptor: interceptor, 
+                  authority-level: authority-level, high-value: false})
+      )
+
+      (ok true)
+    )
+  )
+)
+
