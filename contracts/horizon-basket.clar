@@ -657,3 +657,81 @@
     )
   )
 )
+
+;; Cryptographic transaction verification
+(define-public (cryptographically-verify-transaction (basket-id uint) (message-digest (buff 32)) (signature-data (buff 65)) (signatory principal))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (verification-result (unwrap! (secp256k1-recover? message-digest signature-data) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq signatory originator) (is-eq signatory beneficiary)) (err u151))
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+
+      ;; Verify signature matches expected signatory
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) signatory) (err u153))
+
+      (print {action: "cryptographic_verification_complete", basket-id: basket-id, verifier: tx-sender, signatory: signatory})
+      (ok true)
+    )
+  )
+)
+
+;; Attach basket documentation
+(define-public (attach-basket-documentation (basket-id uint) (document-category (string-ascii 20)) (document-digest (buff 32)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+      )
+      ;; Only authorized parties can add documentation
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get basket-status basket-data) "delivered")) (err u160))
+      (asserts! (not (is-eq (get basket-status basket-data) "reverted")) (err u161))
+      (asserts! (not (is-eq (get basket-status basket-data) "lapsed")) (err u162))
+
+      ;; Valid documentation categories
+      (asserts! (or (is-eq document-category "resource-details") 
+                   (is-eq document-category "delivery-proof")
+                   (is-eq document-category "quality-attestation")
+                   (is-eq document-category "originator-instructions")) (err u163))
+
+      (print {action: "documentation_attached", basket-id: basket-id, document-category: document-category, 
+              document-digest: document-digest, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Configure delayed recovery mechanism
+(define-public (configure-delayed-recovery (basket-id uint) (delay-duration uint) (recovery-delegate principal))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> delay-duration u72) ERR_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-duration u1440) ERR_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (activation-block (+ block-height delay-duration))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq recovery-delegate originator)) (err u180)) ;; Recovery delegate must differ from originator
+      (asserts! (not (is-eq recovery-delegate (get beneficiary basket-data))) (err u181)) ;; Recovery delegate must differ from beneficiary
+      (print {action: "delayed_recovery_configured", basket-id: basket-id, originator: originator, 
+              recovery-delegate: recovery-delegate, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
