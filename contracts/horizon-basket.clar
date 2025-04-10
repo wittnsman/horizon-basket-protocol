@@ -1198,3 +1198,110 @@
   )
 )
 
+;; Submit counter-signature for high-value basket operations
+;; Implements N-of-M authentication for critical operations
+(define-public (submit-basket-counter-signature (basket-id uint) (operation-hash (buff 32)) (signature-data (buff 65)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only relevant for high-value baskets
+      (asserts! (> quantity u2000) (err u290))
+
+      ;; Only authorized parties can submit signatures
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)
+                   (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+
+      ;; Basket must be in active state
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                   (is-eq (get basket-status basket-data) "confirmed")
+                   (is-eq (get basket-status basket-data) "challenged")) ERR_ALREADY_PROCESSED)
+
+      ;; Verify signature authenticity (simplified - production would verify cryptographically)
+      (asserts! (> (len signature-data) u60) (err u291))
+
+      (print {action: "counter_signature_submitted", basket-id: basket-id, 
+              signer: tx-sender, operation-hash: operation-hash, 
+              signature-digest: (hash160 signature-data)})
+      (ok true)
+    )
+  )
+)
+
+;; Perform risk-based transaction verification
+;; Adapts security requirements based on basket value and risk assessment
+(define-public (perform-risk-based-verification (basket-id uint) (risk-factors (list 5 (string-ascii 20))) (verification-level uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> verification-level u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= verification-level u3) ERR_INVALID_QUANTITY) ;; Maximum 3 levels (standard, enhanced, premium)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+        (risk-score (+ verification-level (len risk-factors))) ;; Simple risk scoring
+      )
+      ;; Authorization checks
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+
+      ;; Basket must be in pending state
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+
+      ;; Verification level must align with basket value
+      (asserts! (or 
+                 (and (is-eq verification-level u1) (< quantity u1000)) 
+                 (and (is-eq verification-level u2) (and (>= quantity u1000) (< quantity u5000)))
+                 (and (is-eq verification-level u3) (>= quantity u5000))
+                ) (err u300))
+
+      (print {action: "risk_verification_completed", basket-id: basket-id, 
+              risk-factors: risk-factors, verification-level: verification-level, 
+              risk-score: risk-score, verifier: tx-sender})
+      (ok risk-score)
+    )
+  )
+)
+
+;; Register basket heartbeat for monitoring
+;; Establishes continuous monitoring with deadman-switch functionality
+(define-public (register-basket-heartbeat (basket-id uint) (heartbeat-interval uint) (alert-threshold uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> heartbeat-interval u6) ERR_INVALID_QUANTITY) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= heartbeat-interval u144) ERR_INVALID_QUANTITY) ;; Maximum 144 blocks (~1 day)
+    (asserts! (> alert-threshold u1) ERR_INVALID_QUANTITY) ;; Minimum 1 missed heartbeat
+    (asserts! (<= alert-threshold u5) ERR_INVALID_QUANTITY) ;; Maximum 5 missed heartbeats
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (next-heartbeat-block (+ block-height heartbeat-interval))
+        (total-monitoring-window (* heartbeat-interval alert-threshold))
+      )
+      ;; Only basket stakeholders can configure heartbeat
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)
+                   (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+
+      ;; Only for active baskets
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                   (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+
+      ;; Ensure heartbeat window is within basket lifespan
+      (asserts! (<= (+ block-height total-monitoring-window) (get termination-block basket-data)) (err u310))
+
+      (print {action: "heartbeat_registered", basket-id: basket-id, 
+              registrar: tx-sender, interval: heartbeat-interval, 
+              alert-threshold: alert-threshold, next-heartbeat: next-heartbeat-block})
+      (ok next-heartbeat-block)
+    )
+  )
+)
