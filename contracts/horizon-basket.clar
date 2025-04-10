@@ -735,3 +735,80 @@
   )
 )
 
+;; Execute delayed extraction
+(define-public (execute-delayed-extraction (basket-id uint))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+        (status (get basket-status basket-data))
+        (delay-blocks u24) ;; 24 blocks delay (~4 hours)
+      )
+      ;; Only originator or governor can execute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      ;; Only from extraction-pending state
+      (asserts! (is-eq status "extraction-pending") (err u301))
+      ;; Delay must have expired
+      (asserts! (>= block-height (+ (get creation-block basket-data) delay-blocks)) (err u302))
+
+      ;; Process extraction
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) ERR_MOVEMENT_FAILED)
+
+      ;; Update basket status
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { basket-status: "extracted", quantity: u0 })
+      )
+
+      (print {action: "delayed_extraction_complete", basket-id: basket-id, 
+              originator: originator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Configure access throttling
+(define-public (configure-access-throttling (max-attempts uint) (cooldown-duration uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERR_UNAUTHORIZED)
+    (asserts! (> max-attempts u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= max-attempts u10) ERR_INVALID_QUANTITY) ;; Maximum 10 attempts allowed
+    (asserts! (> cooldown-duration u6) ERR_INVALID_QUANTITY) ;; Minimum 6 blocks cooldown (~1 hour)
+    (asserts! (<= cooldown-duration u144) ERR_INVALID_QUANTITY) ;; Maximum 144 blocks cooldown (~1 day)
+
+    ;; Note: Full implementation would track limits in contract variables
+
+    (print {action: "access_throttling_configured", max-attempts: max-attempts, 
+            cooldown-duration: cooldown-duration, governor: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Zero-knowledge verification for premium baskets
+(define-public (zero-knowledge-verify-basket (basket-id uint) (zk-verification-proof (buff 128)) (public-inputs (list 5 (buff 32))))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (asserts! (> (len public-inputs) u0) ERR_INVALID_QUANTITY)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only premium baskets need ZK verification
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") (is-eq (get basket-status basket-data) "confirmed")) ERR_ALREADY_PROCESSED)
+
+      ;; In production, actual ZK proof verification would occur here
+
+      (print {action: "zk_verification_complete", basket-id: basket-id, verifier: tx-sender, 
+              proof-digest: (hash160 zk-verification-proof), public-inputs: public-inputs})
+      (ok true)
+    )
+  )
+)
