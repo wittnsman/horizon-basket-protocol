@@ -572,3 +572,88 @@
     )
   )
 )
+
+;; Create phased delivery basket
+(define-public (create-phased-basket (beneficiary principal) (resource-id uint) (quantity uint) (phases uint))
+  (let 
+    (
+      (new-id (+ (var-get basket-sequence-id) u1))
+      (termination-date (+ block-height BASKET_LIFESPAN_BLOCKS))
+      (phase-quantity (/ quantity phases))
+    )
+    (asserts! (> quantity u0) ERR_INVALID_QUANTITY)
+    (asserts! (> phases u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= phases u5) ERR_INVALID_QUANTITY) ;; Maximum 5 phases
+    (asserts! (valid-beneficiary? beneficiary) ERR_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* phase-quantity phases) quantity) (err u121)) ;; Ensure even division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set basket-sequence-id new-id)
+          (print {action: "phased_basket_created", basket-id: new-id, originator: tx-sender, beneficiary: beneficiary, 
+                  resource-id: resource-id, quantity: quantity, phases: phases, phase-quantity: phase-quantity})
+          (ok new-id)
+        )
+      error ERR_MOVEMENT_FAILED
+    )
+  )
+)
+
+;; Schedule administrative task
+(define-public (schedule-administrative-task (task-type (string-ascii 20)) (task-parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERR_UNAUTHORIZED)
+    (asserts! (> (len task-parameters) u0) ERR_INVALID_QUANTITY)
+    (let
+      (
+        (execution-time (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {action: "task_scheduled", task-type: task-type, task-parameters: task-parameters, execution-time: execution-time})
+      (ok execution-time)
+    )
+  )
+)
+
+;; Activate enhanced verification for premium baskets
+(define-public (activate-enhanced-verification (basket-id uint) (verification-hash (buff 32)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (quantity (get quantity basket-data))
+      )
+      ;; Only for baskets above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get basket-status basket-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "enhanced_verification_activated", basket-id: basket-id, originator: originator, verification-hash: (hash160 verification-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Suspend questionable basket
+(define-public (suspend-questionable-basket (basket-id uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (basket-exists? basket-id) ERR_INVALID_BASKET_ID)
+    (let
+      (
+        (basket-data (unwrap! (map-get? BasketRegistry { basket-id: basket-id }) ERR_BASKET_MISSING))
+        (originator (get originator basket-data))
+        (beneficiary (get beneficiary basket-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_GOVERNOR) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get basket-status basket-data) "pending") 
+                   (is-eq (get basket-status basket-data) "confirmed")) 
+                ERR_ALREADY_PROCESSED)
+      (map-set BasketRegistry
+        { basket-id: basket-id }
+        (merge basket-data { basket-status: "suspended" })
+      )
+      (print {action: "basket_suspended", basket-id: basket-id, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
